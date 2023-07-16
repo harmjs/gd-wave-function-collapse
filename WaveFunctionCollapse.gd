@@ -1,10 +1,5 @@
 extends Node2D
 
-#var texture_path = "res://flowers.png"
-#var texture = load(texture_path)
-
-var source_image = load("res://simple_case.png")
-
 var N = 3
 var N2 = Vector2(N, N)
 
@@ -28,31 +23,36 @@ var counts
 var weight_log_weights
 var entropies
 
-#var n_overlaps
-#var xyn_overlaps
-#var xyn_overlaps_size
-
 var waves
 var stack
 var width
 
 var height
 
+#                0:RIGHT  1:DOWN  2:LEFT   3:UP
 var directions = [[1, 0], [0, 1], [-1, 0], [0, -1]]
 var observe_count = 0 
 var collapsed_indices = []
-var rendered = []
+var pixels = []
+ 
+# TODO: Patterns which have no legal matches at runtime (void edge) need to be turned off
 
-# Called when the node enters the scene tree for the first time.
+# TODO: Add rotation support...
+# When there is a pattern, we also add all mirrored and rotated versions of that pattern...
+# 
+
+# How can we determine what is the ideal rotation of a piece?
+# 1. first instance found...
+# 2. Pattern properties.
+
 
 func _ready():
-	
 	var source_image = Image.new()
-	source_image.load("res://flowers.png")
+	source_image.load("res://knot.png")
 	source_image.lock()
 	
-	width = 5
-	height = 5
+	width = 100
+	height = 100
 	
 	init_patterns(source_image)
 	debug_patterns()
@@ -60,16 +60,18 @@ func _ready():
 	init_propagator()
 	init_waves()
 	
-	run(10)
+	var file = File.new()
+	file.open("res://debug.json", File.WRITE)
+	file.store_line(to_json(propagator))
+	file.close()
+
+	run(10000000)
 	
 	for x in (width - N + 1): for y in (height - N + 1):
 		for pattern_index in patterns.size():
 			if waves[x][y][pattern_index]:
 				observed[x][y] = pattern_index
 				break
-				
-	print(observed)
-	print(observe_count)
 	
 func run(limit):
 	stack = []
@@ -83,10 +85,12 @@ func run(limit):
 		
 		collapsed_indices.append(min_entropy)		
 		
-		observe(wave_x, wave_y)
-		propagate()
+		var selected_pattern_index = observe(wave_x, wave_y)
 		
-
+		observe_count += 1;
+		propagate(10000)
+		
+	render_output()
 		
 func observe(wave_x, wave_y):
 	var wave = waves[wave_x][wave_y]
@@ -107,38 +111,42 @@ func observe(wave_x, wave_y):
 			selected_pattern_index = pattern_index
 			break
 		min_weight = max_weight
+		
+	print("observed x=" + str(wave_x) + " y=" + str(wave_y) + " selected pattern=" + str(selected_pattern_index))
 	for pattern_index in wave.size():
 		if pattern_index != selected_pattern_index && wave[pattern_index]:
 			ban(wave_x, wave_y, pattern_index)
+			
 	return selected_pattern_index
 
 func ban(wave_x, wave_y, pattern_index):
-	waves[wave_x][wave_y][pattern_index] = false	
+	print("banning x=" + str(wave_x) + " y=" + str(wave_y) + " banned_pattern=" + str(pattern_index))
+	stack.append([wave_x, wave_y, pattern_index])
+	
+	waves[wave_x][wave_y][pattern_index] = false
 	for direction_index in 4:
 		compatible[wave_x][wave_y][pattern_index][direction_index] = 0
 	counts[wave_x][wave_y] -= 1
 	weight_sums[wave_x][wave_y] -= weights[pattern_index]
 	weight_log_weight_sums[wave_x][wave_y] -= weight_log_weights[pattern_index]
+	
 	var weight_sum = weight_sums[wave_x][wave_y]
+		
 	entropies[wave_x][wave_y] = (log(weight_sum) 
 		- weight_log_weight_sums[wave_x][wave_y] / weight_sum)
-	stack.append([wave_x, wave_y, pattern_index])
 	
-func draw_pattern():
-	rendered = []
 	
-	for wave_x in width - N + 1:
-		for wave_y in height - N + 1:
-			for pattern_index in waves[wave_x][wave_y]:
-				pass
+# When 5 is banned its wrongly banning two on the right side of it... have a look at the propagator and the constraints
 	
-func propagate():
-	while stack.size() > 0:
+func propagate(limit):
+	var current = 0
+	while current < limit and stack.size() > 0:
 		var item = stack.pop_back()
 		var wave_x = item[0]
 		var wave_y = item[1]
 		var removed_pat_index = item[2]
 		var wave = waves[wave_x][wave_y]
+		print("propagating x=" + str(wave_x) + " y=" + str(wave_y) + " removed pattern=" + str(removed_pat_index))
 		for direction_index in 4:	
 			var direction_x = directions[direction_index][0]
 			var direction_y = directions[direction_index][1]
@@ -146,23 +154,92 @@ func propagate():
 			var neighbour_y = wave_y + direction_y
 			if neighbour_x < 0 or neighbour_x >= (width - N + 1): continue
 			if neighbour_y < 0 or neighbour_y >= (height - N + 1): continue
+			
 			var neighbour = waves[neighbour_x][neighbour_y]
+			
 			var enabled_pat_indices = propagator[removed_pat_index][direction_index]
+			
 			for enabled_pat_index in enabled_pat_indices:
+				if !neighbour[enabled_pat_index]: continue
+				
 				# for each enabled pattern we check it's enabler count:
 				# if it's enable count is lowevered to 0 we kill the pattern
-				compatible[neighbour_x][neighbour_y][enabled_pat_index][direction_index] -= 1;
 				
-				if compatible[neighbour_x][neighbour_y][enabled_pat_index][direction_index] == 0:
+				compatible[neighbour_x][neighbour_y][enabled_pat_index][direction_index] -= 1
+				var enablers = compatible[neighbour_x][neighbour_y][enabled_pat_index][direction_index]
+				
+				print("checking x=" + str(neighbour_x) + " y=" + str(neighbour_y) + " pattern=" + str(enabled_pat_index) + " in direction=" + str(direction_index) + " enablers=" + str(enablers))
+				
+				if compatible[neighbour_x][neighbour_y][enabled_pat_index][direction_index] <= 0:
 					ban(neighbour_x, neighbour_y, enabled_pat_index)
-					
-		#print("finished propatating x=" + str(wave_x) + " y=" + str(wave_y) + " banned_pattern=" + str(removed_pat_index))
+		current += 1
+		"""print("finished propatating x=" + str(wave_x) + " y=" + str(wave_y) + " banned_pattern=" + str(removed_pat_index))"""
 	
 func render_output():
 	var output_image = Image.new()
 	output_image.create(width, height, false, Image.FORMAT_RGBA4444)
 	output_image.lock()
 	
+	pixels = [];
+	for x in width: 
+		pixels.append([])
+		for y in height:
+			pixels[x].append({})
+	
+	for wave_x in width - N + 1: for wave_y in height - N + 1:
+		var wave = waves[wave_x][wave_y]
+		for pattern_index in patterns.size():
+			if wave[pattern_index] == true:
+				for pattern_x in 3: for pattern_y in 3:
+					
+					var x = wave_x + pattern_x
+					var y = wave_y + pattern_y
+					
+					var color = colors[patterns[pattern_index][pattern_x][pattern_y]]
+					if not pixels[x][y].has(color):
+						pixels[x][y][color] = 0
+					pixels[x][y][color] += 1
+					
+	for x in width:
+		for y in height:
+			var pixel = pixels[x][y]
+			
+			if pixel.size() == 1:
+				output_image.set_pixel(x, y, pixel.keys()[0])
+			else:
+				
+				var total_count = 0
+				var r = 0
+				var g = 0
+				var b = 0
+				
+				for color in pixel:
+					var count = pixel[color]
+					total_count += count
+					
+					r += color.r * count
+					g += color.g * count
+					b += color.b * count
+				
+				r = r / total_count
+				g = g / total_count
+				b = b / total_count
+				
+				var color = Color(r, g, b, 0.5)
+				output_image.set_pixel(x, y, color)
+				
+	#output_image.save_png("res://output_image.png")
+	output_image.unlock()
+	
+	var texture = ImageTexture.new()
+	texture.create_from_image(output_image)
+	texture.set_flags(0)
+	
+	var sprite = get_child(0)
+	sprite.set_texture(texture)
+	sprite.visible = true
+	sprite.scale = Vector2(10, 10)
+	sprite.centered = false
 func init_waves():
 	stack = []
 	weight_log_weights = []
@@ -202,7 +279,7 @@ func init_waves():
 				compatible[x][y].append([])
 				for direction_index in 4:
 					compatible[x][y][pattern_index].append(
-						propagator[pattern_index][direction_index].size()) 
+						propagator[pattern_index][(direction_index + 2) % 4].size())
 
 func are_patterns_equal(pattern_a, pattern_b):
 	for x in N: for y in N: if pattern_a[x][y] != pattern_b[x][y]: return false
@@ -270,6 +347,7 @@ func init_propagator():
 				propagator[pattern_index_a][direction_index_a].append(pattern_index_b)
 				if pattern_index_a == pattern_index_b: continue
 				propagator[pattern_index_b][direction_index_b].append(pattern_index_a)
+				
 func init_patterns(image:Image):
 	var width = image.get_width()
 	var height = image.get_height()
@@ -301,91 +379,15 @@ func init_patterns(image:Image):
 			weights.append(1)
 		else:
 			weights[index] +=1
-"""
-func create_xyn_overlaps():
-	n_overlaps = []
-	for n in range((N*2)-1):
-		var n_offsets = []
-		for n_offset in range(-N + n, n): if abs(n_offset) < (N-1):
-			n_offsets.append(n_offset)	
-		n_overlaps.append(n_offsets)
-	
-	var n_overlaps_size = n_overlaps.size()
-	
-	var xyn_overlaps = []
-	for xn_overlap_index in n_overlaps_size:
-		var xn_overlap = n_overlaps[xn_overlap_index]
-		
-		xyn_overlaps.append([])
-		
-		for yn_overlap_index in n_overlaps_size:
-			var yn_overlap = n_overlaps[yn_overlap_index]
-			
-			var xyn_offsets = []
-			
-			for xn_offset in xn_overlap: for yn_offset in yn_overlap:
-				xyn_offsets.append([xn_offset + 1, yn_offset + 1])
-				
-			xyn_overlaps[xn_overlap_index].append(xyn_offsets)
-	return xyn_overlaps
-	
-func init_constriant_index():
-	xyn_overlaps = create_xyn_overlaps()
-	xyn_overlaps_size = xyn_overlaps.size()
-
-	constraint_index = []
-	for pattern_index in patterns.size():
-		constraint_index.append([])
-		for xn_overlap_index in xyn_overlaps_size: 
-			constraint_index[pattern_index].append([])
-			for yn_overlap_index in xyn_overlaps_size:	
-				constraint_index[pattern_index][xn_overlap_index].append([])
-		
-	for pattern_index_a in range(patterns.size() - 1): for pattern_index_b in range(pattern_index_a, patterns.size()):
-		var pattern_a = patterns[pattern_index_a]
-		var pattern_b = patterns[pattern_index_b]
-		
-		for xn_overlap_index_a in xyn_overlaps_size:
-			var xn_overlap_index_b = xyn_overlaps_size - 1 - xn_overlap_index_a
-			for yn_overlap_index_a in xyn_overlaps_size:
-				if xn_overlap_index_a == 2 && yn_overlap_index_a == 2: continue
-				
-				var yn_overlap_index_b = xyn_overlaps_size - 1 - yn_overlap_index_a
-				
-				var xyn_offsets_a = xyn_overlaps[xn_overlap_index_a][yn_overlap_index_a]
-				var xyn_offsets_b = xyn_overlaps[xn_overlap_index_b][yn_overlap_index_a]
-				
-				var pattern_overlap_match = true;
-				
-				for xyn_offset_index in xyn_offsets_a.size():
-					var xyn_offset_a = xyn_offsets_a[xyn_offset_index]
-					var xyn_offset_b = xyn_offsets_b[xyn_offset_index]
-					
-					var symbol_a = pattern_a[xyn_offset_a[0]][xyn_offset_a[1]]
-					var symbol_b = pattern_b[xyn_offset_b[0]][xyn_offset_b[1]]
-					
-					if symbol_a != symbol_b:
-						pattern_overlap_match = false;
-						break;
-					
-				if pattern_overlap_match:
-					constraint_index[pattern_index_a][xn_overlap_index_a][yn_overlap_index_a].append(pattern_index_b)
-					
-					if (pattern_index_a == pattern_index_b): continue
-					
-					constraint_index[pattern_index_b][xn_overlap_index_b][yn_overlap_index_b].append(pattern_index_a)
-"""
-
 
 func debug_patterns():
-	var debug_image = Image.new()
-	
-	var SCALE_FACTOR = 4
+	var SCALE_FACTOR = 8
 	
 	var col_row_size = ceil(sqrt(float(patterns.size())))
 	
 	var size = col_row_size * (N+1) - 1
 	
+	var debug_image = Image.new()
 	debug_image.create(size, size, false, Image.FORMAT_RGBA4444)
 	debug_image.lock()
 	
